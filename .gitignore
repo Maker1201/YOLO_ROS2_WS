@@ -1,0 +1,63 @@
+# ROS2 build artifacts
+build/
+devel/
+dist/
+install/
+log/
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+
+# C++
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Models and large files
+models/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Generated files
+*.pb.cc
+*.pb.h
+*.pb2.py
+*.pb3.py
+
+# ROS specific
+*.log
+*.backup
+
+# Build system
+ament_copyright.list
+ament_cmake_copyright/*.txt
+ament_cmake_copyright/check_copyright/*.txt
+ament_cmake_copyright/uncopyrighted/*.txt

@@ -1,0 +1,349 @@
+#pragma once
+#include <rclcpp/rclcpp.hpp>
+#include <boost/shared_ptr.hpp>
+#include <boost/cstdint.hpp>
+#include <boost/bind.hpp>
+#include <boost/function.hpp>
+#include <vector>
+#include <thread>
+#include <map>
+#include <condition_variable>
+#include <mutex>
+
+#include "TYParameter.h"
+#include "percipio_depth_algorithm.h"
+
+#include "percipio_video_mode.h"
+
+#include "percipio_xml.h"
+
+namespace percipio_camera {
+
+enum percipio_stream_type {
+    DEPTH,
+    COLOR,
+    IR_LETF,
+    IR_RIGHT
+};
+
+enum percipio_rectification_mode{
+    DISTORTION_CORRECTION,
+    EPIPOLAR_RECTIFICATION
+};
+
+enum percipio_dev_workmode {
+    CONTINUOUS = 0,
+    SOFTTRIGGER,
+    HARDTRIGGER,
+};
+
+enum ir_enhance_model
+{
+    IREnhanceOFF    = 0,
+    IREnhanceLinearStretch       = 1,
+    IREnhanceLinearStretch_Multi = 2, //2-20;  Def:8
+    IREnhanceLinearStretch_STD   = 3, //2-20;  Def:6
+    IREnhanceLinearStretch_LOG2  = 4, //5-50;  Def:20
+    IREnhanceLinearStretch_Hist  = 5
+};
+
+enum percipio_dev_ros_event {
+    TY_EVENT_DEVICE_CONNECT = 50000,
+    TY_EVENT_DEVICE_TIMEOUT = 50001,
+};
+
+enum EncodingType : uint32_t  
+{
+  HUFFMAN = 0,
+};
+
+enum GigEVersion
+{
+    GigeE_2_0,
+    GigeE_2_1,    
+};
+
+class image_intrinsic
+{
+    public:
+        image_intrinsic() {}
+        image_intrinsic(const int width, const int height, const float fx, const float fy, const float cx, const float cy);
+        image_intrinsic(const int width, const int height, const TY_CAMERA_INTRINSIC& intr);
+        ~image_intrinsic();
+
+        int width()  { return m_width; }
+        int height() { return m_height; }
+        float fx() { return intrinsic[0]; }
+        float cx() { return intrinsic[2]; }
+        float fy() { return intrinsic[4]; }
+        float cy() { return intrinsic[5]; }
+ 
+        image_intrinsic resize(const float f_scale_x, const float f_scale_y);
+        image_intrinsic resize(const int width, const int height);
+
+        TY_CAMERA_INTRINSIC data();
+    private:
+        int32_t m_width;
+        int32_t m_height;
+
+        /// | fx|  0| cx|
+        /// |  0| fy| cy|
+        /// |  0|  0|  1|
+        float intrinsic[9];
+};
+
+class PercipioDevice;
+typedef std::pair<percipio_stream_type, int> percipio_stream_index_pair;
+typedef boost::function<void(VideoStream&)> FrameCallbackFunction;
+typedef boost::function<void(PercipioDevice*, TY_EVENT_INFO*)> PercipioDeviceEventCallbackFunction;
+
+
+struct percipio_stream_property
+{
+    percipio_stream_index_pair idx;
+    std::string resolution;
+    std::string format;
+};
+
+struct percipio_video_mode
+{
+    uint32_t fmt;
+    uint32_t width;
+    uint32_t height;
+    uint32_t binning;
+    std::string desc;
+};
+
+typedef std::map<uint32_t, std::vector<percipio_video_mode>> PercipioVideoMode;
+
+class PercipioCameraNode;
+
+typedef struct {
+    std::string node_desc;
+    std::string node_info;
+} device_node_info;
+
+typedef std::map<std::string, std::vector<device_node_info>> percipio_feat_info;
+
+class GigEBase
+{
+public:
+    GigEBase(const TY_DEV_HANDLE dev) : hDevice(dev){};
+    virtual ~GigEBase() {};
+
+    virtual TY_STATUS init() = 0;
+
+    virtual void video_mode_init();
+
+    virtual int parse_xml_parameters(const std::string& xml);
+
+    virtual bool PeriodicSoftTriggerEnable() { return soft_frame_rate_ctrl_enable; }
+    virtual float PeriodicSoftTriggerFpS() { return soft_frame_rate; }
+
+    virtual TY_STATUS work_mode_init(percipio_dev_workmode mode, const bool fix_rate, const float rate) = 0;
+
+    virtual void device_load_parameters() = 0;
+
+    virtual TY_STATUS dump_image_mode_list(const TY_COMPONENT_ID comp, std::vector<percipio_video_mode>& modes) = 0;
+
+    virtual TY_STATUS image_mode_cfg(const TY_COMPONENT_ID comp, const percipio_video_mode& mode) = 0;
+
+    virtual TY_STATUS stream_calib_data_init(const TY_COMPONENT_ID comp, TY_CAMERA_CALIB_INFO& calib_data) = 0;
+
+    virtual TY_STATUS EnableHwIRUndistortion() = 0;
+
+    virtual TY_STATUS getIRLensType(TYLensOpticalType& type) = 0;
+    virtual TY_STATUS getIRRectificationMode(percipio_rectification_mode& mode) = 0;
+
+    virtual TY_STATUS getLeftIRRotation(TY_CAMERA_ROTATION& rotation) = 0;
+    virtual TY_STATUS getLeftIRRectifiedIntr(TY_CAMERA_INTRINSIC& rectified_intr) = 0;
+
+    virtual TY_STATUS getRightIRRotation(TY_CAMERA_ROTATION& rotation) = 0;
+    virtual TY_STATUS getRightIRRectifiedIntr(TY_CAMERA_INTRINSIC& rectified_intr) = 0;
+
+    virtual void depth_stream_distortion_check(bool& has_undist_data) = 0;
+
+    virtual TY_STATUS depth_scale_unit_init(float& dept_scale_unit) = 0;
+
+    virtual TY_STATUS color_stream_aec_roi_init(const TY_AEC_ROI_PARAM& ROI) = 0;
+
+    virtual TY_STATUS send_soft_trigger_signal() = 0;
+
+    virtual void reset() = 0;
+
+    uint32_t streams() { return allComps;}
+public:
+    PercipioVideoMode mVideoMode;
+    
+protected:
+    TY_DEV_HANDLE hDevice;
+    TY_COMPONENT_ID allComps = 0;
+
+    bool soft_frame_rate_ctrl_enable = false;
+    float soft_frame_rate = 5.f;
+
+    tinyxml2::XMLDocument m_doc;
+    percipio_feat_info parameters;
+};
+
+class PercipioDevice
+{
+    public:
+        PercipioDevice(const char* faceId, const char* deviceId);
+        ~PercipioDevice();
+
+        void set_workmode(percipio_dev_workmode mode) { workmode = mode; }
+        
+        TY_STATUS Reconnect();
+        void Release();
+        void register_node(void* para) { _node = (PercipioCameraNode*)para; }
+
+        bool isAlive();
+        PercipioDeviceEventCallbackFunction _event_callback;
+        void registerCameraEventCallback(PercipioDeviceEventCallbackFunction callback);
+        void setDeviceConfig(const std::string& config_xml);
+        void reset();
+
+        std::string serialNumber();
+        std::string modelName();
+        std::string buildHash();
+        std::string configVersion();
+
+        bool hasColor();
+        bool hasDepth();
+        bool hasLeftIR();
+        bool hasRightIR();
+
+        std::unique_ptr<GigEBase> m_gige_dev;
+
+        void enable_offline_reconnect(const bool en);
+
+        void frame_rate_init(const bool en, const float fps);
+
+        bool set_laser_power(const int power);
+        
+        float getDepthValueScale();
+        
+        bool stream_open(const percipio_stream_index_pair& idx, const std::string& resolution, const std::string& format);
+        bool stream_close(const percipio_stream_index_pair& idx);
+        bool stream_start();
+        bool stream_stop();
+        void send_softtrigger();
+
+        void setFrameCallback(FrameCallbackFunction callback);
+
+        void topics_depth_stream_enable(bool enable);
+        void topics_point_cloud_enable(bool enable);
+        void topics_color_point_cloud_enable(bool enable);
+        void topics_depth_registration_enable(bool enable);
+
+        void depth_speckle_filter_init(bool enable, int spec_size, int spec_diff, float phy_size);
+        void dpeth_time_domain_filter_init(bool enable, int number);
+
+        void ir_enhance_mode_init(ir_enhance_model mode, int coeff);
+        void ir_undistortion_enable(bool en);
+
+        std::mutex softtrigger_mutex;
+
+        std::mutex offline_detect_mutex;
+        std::condition_variable offline_detect_cond;
+
+        TY_EVENT_INFO device_ros_event;
+
+    private:
+        PercipioCameraNode* _node;
+
+        GigEVersion  gige_version = GigeE_2_0;
+
+        bool b_dev_auto_reconnect = false;
+        bool reconnect = false;
+
+        percipio_dev_workmode workmode = CONTINUOUS;
+
+        bool b_dev_frame_rate_ctrl_en = false;
+        float f_dev_frame_rate = 5.f;
+
+        std::string strFaceId;
+        std::string strDeviceId;
+        std::vector<percipio_stream_property> m_streams;
+
+        bool alive;
+        TY_INTERFACE_HANDLE hIface;
+        TY_DEV_HANDLE handle;
+
+        TY_DEVICE_BASE_INFO base_info;
+        
+        std::atomic_bool is_running_{false};
+
+        FrameCallbackFunction  _callback;
+
+        bool  b_need_do_depth_undistortion = false;
+        bool  has_depth_calib_data = false;
+        bool  has_color_calib_data = false;
+
+        bool topics_depth_ = false;
+        bool topics_p3d_ = false;
+        bool topics_color_p3d_ = false;
+        bool topics_d_registration_ = false;
+
+        bool b_depth_spk_filter_en = false;
+        int  m_depth_spk_size = 150;
+        int  m_depth_spk_diff = 64;
+        float f_depth_spk_phy_size = 20.f;
+
+        bool b_depth_time_domain_en = false;
+        int  m_depth_time_domain_frame_num = 3;
+        std::unique_ptr<DepthTimeDomainMgr> DepthDomainTimeFilterMgrPtr;
+
+        ir_enhance_model enhance_mode;
+        int m_enhance_coeff;
+
+        bool b_do_ir_undist = true;
+        bool b_enable_sw_ir_undistortion = false;
+
+        percipio_rectification_mode ir_rectificatio_mode = DISTORTION_CORRECTION;
+        TYLensOpticalType    ir_len_type = TY_LENS_PINHOLE;
+
+        std::unique_ptr<std::thread> device_reconnect_thread = nullptr;
+        void device_offline_reconnect();
+
+        float f_scale_unit = 1.f;
+        TY_CAMERA_CALIB_INFO cam_depth_calib_data;
+        TY_CAMERA_CALIB_INFO cam_color_calib_data;
+
+        TY_CAMERA_CALIB_INFO cam_left_ir_calib_data;
+        TY_CAMERA_ROTATION   left_ir_rotation;
+        TY_CAMERA_INTRINSIC  left_ir_rectified_intr;
+
+        TY_CAMERA_CALIB_INFO cam_right_ir_calib_data;
+        TY_CAMERA_ROTATION   right_ir_rotation;
+        TY_CAMERA_INTRINSIC  right_ir_rectified_intr;
+
+        image_intrinsic cam_depth_intrinsic;
+        image_intrinsic cam_color_intrinsic;
+        image_intrinsic cam_leftir_intrinsic;
+        image_intrinsic cam_rightir_intrinsic;
+
+        std::unique_ptr<std::thread> frame_rate_ctrl_thread_ = nullptr;
+        std::unique_ptr<std::thread> frame_recive_thread_ = nullptr;
+        std::unique_ptr<VideoStream> VideoStreamPtr = nullptr;
+        std::vector<unsigned char> frameBuffer[2];
+
+        void softTriggerSend();
+        void frameDataReceive();
+
+        TY_STATUS device_open(const char* faceId, const char* deviceId);
+
+        bool resolveStreamResolution(const std::string& resolution_, uint32_t& width, uint32_t& height);
+        std::string parseStreamFormat(const std::string& format);
+
+        TY_STATUS IREnhancement(TYImage& IR);
+        TY_STATUS IRUndistortion(TYImage& IR, const TY_CAMERA_CALIB_INFO *calib_info, const TY_CAMERA_ROTATION *cameraRotation, const TY_CAMERA_INTRINSIC *cameraNewIntrinsic, const TYLensOpticalType type = TY_LENS_PINHOLE);
+
+        void colorStreamReceive(const TYImage& color, uint64_t& timestamp);
+        void leftIRStreamReceive(TYImage& ir,   uint64_t& timestamp);
+        void rightIRStreamReceive(TYImage& ir,  uint64_t& timestamp);
+        void depthStreamReceive(TYImage& depth, uint64_t& timestamp);
+        void p3dStreamReceive(const TYImage& depth,   uint64_t& timestamp);
+};
+}
